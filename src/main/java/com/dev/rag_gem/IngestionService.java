@@ -7,40 +7,51 @@ import org.springframework.ai.transformer.splitter.TextSplitter;
 import org.springframework.ai.transformer.splitter.TokenTextSplitter;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.ApplicationListener;
 import org.springframework.core.io.Resource;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
-import org.springframework.ai.document.Document;
-import org.springframework.ai.vectorstore.SearchRequest;
-import java.util.List;
 
 @Component
-public class IngestionService implements CommandLineRunner {
+public class IngestionService implements ApplicationListener<ApplicationReadyEvent> {
 
     private static final Logger log = LoggerFactory.getLogger(IngestionService.class);
     private final VectorStore vectorStore;
-
-    public IngestionService(VectorStore vectorStore) {
-        this.vectorStore = vectorStore;
-    }
+    private final JdbcTemplate jdbcTemplate;
 
     @Value("classpath:/docs/javabook.pdf")
-    private Resource marketPDF;
+    private Resource pdfResource;
+
+    public IngestionService(VectorStore vectorStore, JdbcTemplate jdbcTemplate) {
+        this.vectorStore = vectorStore;
+        this.jdbcTemplate = jdbcTemplate;
+    }
 
     @Override
-    public void run(String... args) throws Exception {
-        List<Document> results = vectorStore.similaritySearch(
-                SearchRequest.builder().query("test").topK(1).build()
+    public void onApplicationEvent(ApplicationReadyEvent event) {
+        Integer count = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM vector_store", Integer.class
         );
 
-        if (!results.isEmpty()) {
-            log.info("Vector Store already has data, skipping ingestion.");
+        if (count != null && count > 0) {
+            log.info("Vector Store already has {} records, skipping ingestion.", count);
             return;
         }
 
-        ParagraphPdfDocumentReader pdfReader = new ParagraphPdfDocumentReader(marketPDF);
+        log.info("Vector Store is empty, starting ingestion...");
+        ParagraphPdfDocumentReader pdfReader = new ParagraphPdfDocumentReader(pdfResource);
+
+        log.info("PDF loaded, splitting into chunks...");
         TextSplitter textSplitter = new TokenTextSplitter();
-        vectorStore.accept(textSplitter.apply(pdfReader.get()));
-        log.info("Vector Store loaded with data!");
+        var chunks = textSplitter.apply(pdfReader.get());
+
+        log.info("Split into {} chunks, storing in vector store...", chunks.size());
+        vectorStore.accept(chunks);
+
+        Integer finalCount = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM vector_store", Integer.class
+        );
+        log.info("Ingestion complete! Vector Store now has {} records.", finalCount);
     }
 }
